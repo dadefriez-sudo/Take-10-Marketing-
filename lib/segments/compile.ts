@@ -115,6 +115,20 @@ function compileRule(rule: SegmentRule, now: Date): Where {
   throw new SegmentCompileError(`Unknown segment field "${field}"`);
 }
 
+/**
+ * Negate a filter on a nullable column, keeping NULL rows in the result.
+ *
+ * Postgres three-valued logic drops NULLs from a plain `NOT (col LIKE …)`, so
+ * "company does not contain acme" would silently exclude everyone with no
+ * company at all. For a marketing filter that reads as a bug — people vanish
+ * from an audience for lacking a field rather than for failing the test — and
+ * it also diverged from the in-memory evaluator used by automation conditions.
+ * Both backends now agree: unset satisfies a negative condition.
+ */
+function negate(field: string, filter: Where): Where {
+  return { OR: [{ NOT: filter }, { [field]: null } as Where] };
+}
+
 // --- string columns --------------------------------------------------------
 
 function compileString(rule: SegmentRule, field: ContactStringField): Where {
@@ -132,7 +146,7 @@ function compileString(rule: SegmentRule, field: ContactStringField): Where {
     return (
       operator === "in"
         ? { [field]: { in: values } }
-        : { NOT: { [field]: { in: values } } }
+        : negate(field, { [field]: { in: values } })
     ) as Where;
   }
 
@@ -143,15 +157,15 @@ function compileString(rule: SegmentRule, field: ContactStringField): Where {
     case "equals":
       return { [field]: { equals: value, ...insensitive } } as Where;
     case "not_equals":
-      return {
-        NOT: { [field]: { equals: value, ...insensitive } },
-      } as Where;
+      return negate(field, {
+        [field]: { equals: value, ...insensitive },
+      } as Where);
     case "contains":
       return { [field]: { contains: value, ...insensitive } } as Where;
     case "not_contains":
-      return {
-        NOT: { [field]: { contains: value, ...insensitive } },
-      } as Where;
+      return negate(field, {
+        [field]: { contains: value, ...insensitive },
+      } as Where);
     case "starts_with":
       return { [field]: { startsWith: value, ...insensitive } } as Where;
     case "ends_with":
@@ -268,11 +282,13 @@ function compileId(rule: SegmentRule, field: ContactIdField): Where {
     case "equals":
       return { [field]: requireString(rule) } as Where;
     case "not_equals":
-      return { NOT: { [field]: requireString(rule) } } as Where;
+      return negate(field, { [field]: requireString(rule) } as Where);
     case "in":
       return { [field]: { in: requireStringArray(rule) } } as Where;
     case "not_in":
-      return { NOT: { [field]: { in: requireStringArray(rule) } } } as Where;
+      return negate(field, {
+        [field]: { in: requireStringArray(rule) },
+      } as Where);
     default:
       throw new SegmentCompileError(
         `Operator "${operator}" is not valid for field "${field}"`,

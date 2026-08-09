@@ -119,7 +119,10 @@ describe("text fields", () => {
     ).toEqual({ email: { contains: "@acme.com", mode: "insensitive" } });
   });
 
-  it("negates with NOT so nulls are handled by Postgres consistently", () => {
+  it("keeps unset rows in a negation", () => {
+    // Postgres would drop NULLs from a bare NOT, quietly removing everyone
+    // with no company from a "does not contain" audience. The explicit null
+    // branch keeps SQL in step with the in-memory evaluator.
     expect(
       compileSegment({
         field: "company",
@@ -127,7 +130,10 @@ describe("text fields", () => {
         value: "test",
       }),
     ).toEqual({
-      NOT: { company: { contains: "test", mode: "insensitive" } },
+      OR: [
+        { NOT: { company: { contains: "test", mode: "insensitive" } } },
+        { company: null },
+      ],
     });
   });
 

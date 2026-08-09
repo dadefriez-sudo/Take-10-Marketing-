@@ -44,6 +44,7 @@ model User {
   activities     Activity[]
   auditLogs      AuditLog[]
   sentInvites    Invitation[] @relation("InvitationInviter")
+  conversations  Conversation[]
 }
 
 // Auth.js adapter models.
@@ -141,6 +142,15 @@ model Workspace {
   tasks         Task[]
   pipelines     Pipeline[]
   deals         Deal[]
+
+  emailTemplates EmailTemplate[]
+  campaigns      Campaign[]
+  messages       Message[]
+  suppressions   Suppression[]
+  consentRecords ConsentRecord[]
+  conversations  Conversation[]
+  automations    Automation[]
+  automationRuns AutomationRun[]
 
   @@unique([organizationId, slug])
   @@index([organizationId])
@@ -305,6 +315,11 @@ model Contact {
   tasks       Task[]
   deals       Deal[]
 
+  messages       Message[]
+  consentRecords ConsentRecord[]
+  conversations  Conversation[]
+  automationRuns AutomationRun[]
+
   @@unique([workspaceId, email])
   @@unique([workspaceId, phone])
   @@index([workspaceId, createdAt])
@@ -407,7 +422,8 @@ model Segment {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  workspace Workspace  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  campaigns Campaign[]
 
   @@unique([workspaceId, name])
   @@index([workspaceId])
@@ -530,4 +546,340 @@ model Deal {
   @@index([workspaceId, status])
   @@index([stageId, position])
   @@index([contactId])
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 — durable job queue
+// ---------------------------------------------------------------------------
+
+/// Work that must survive a restart: scheduled sends, automation waits that
+/// span days, provider retries. Claimed with FOR UPDATE SKIP LOCKED so several
+/// workers can drain the same table without coordinating.
+model Job {
+  id          String    @id @default(cuid())
+  workspaceId String?
+  type        String
+  payload     Json
+  runAt       DateTime  @default(now())
+  attempts    Int       @default(0)
+  maxAttempts Int       @default(5)
+  lockedAt    DateTime?
+  lockedBy    String?
+  completedAt DateTime?
+  failedAt    DateTime?
+  lastError   String?   @db.Text
+  /// Set by callers that must not double-fire if a producer retries.
+  idempotencyKey String? @unique
+  createdAt   DateTime  @default(now())
+
+  @@index([runAt, lockedAt, completedAt])
+  @@index([workspaceId])
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 — messaging
+// ---------------------------------------------------------------------------
+
+enum MessageChannel {
+  EMAIL
+  SMS
+}
+
+enum MessageDirection {
+  OUTBOUND
+  INBOUND
+}
+
+enum MessageStatus {
+  QUEUED
+  SENDING
+  SENT
+  DELIVERED
+  BOUNCED
+  FAILED
+  /// Blocked before sending by consent, suppression, or quiet hours.
+  SUPPRESSED
+}
+
+enum MessageEventType {
+  DELIVERED
+  OPENED
+  CLICKED
+  BOUNCED
+  COMPLAINED
+  FAILED
+  UNSUBSCRIBED
+}
+
+enum SuppressionReason {
+  UNSUBSCRIBE
+  BOUNCE
+  COMPLAINT
+  MANUAL
+  SMS_STOP
+}
+
+enum CampaignStatus {
+  DRAFT
+  SCHEDULED
+  SENDING
+  SENT
+  CANCELLED
+}
+
+model EmailTemplate {
+  id          String   @id @default(cuid())
+  workspaceId String
+  name        String
+  subject     String
+  html        String   @db.Text
+  text        String?  @db.Text
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  workspace Workspace  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  campaigns Campaign[]
+
+  @@unique([workspaceId, name])
+  @@index([workspaceId])
+}
+
+/// A one-off broadcast to a segment. Recurring sends are automations instead.
+model Campaign {
+  id          String         @id @default(cuid())
+  workspaceId String
+  name        String
+  channel     MessageChannel @default(EMAIL)
+  templateId  String?
+  subject     String?
+  body        String         @db.Text
+  segmentId   String?
+  status      CampaignStatus @default(DRAFT)
+  scheduledAt DateTime?
+  startedAt   DateTime?
+  sentAt      DateTime?
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  workspace Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  template  EmailTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  segment   Segment?       @relation(fields: [segmentId], references: [id], onDelete: SetNull)
+  messages  Message[]
+
+  @@unique([workspaceId, name])
+  @@index([workspaceId, status])
+}
+
+/// A single email or SMS in either direction. Inbound messages land here too,
+/// which is what makes the unified inbox possible.
+model Message {
+  id             String           @id @default(cuid())
+  workspaceId    String
+  contactId      String?
+  conversationId String?
+  campaignId     String?
+  automationRunId String?
+  channel        MessageChannel
+  direction      MessageDirection @default(OUTBOUND)
+  status         MessageStatus    @default(QUEUED)
+  toAddress      String
+  fromAddress    String
+  subject        String?
+  body           String           @db.Text
+  providerName   String?
+  providerMessageId String?
+  /// Why a SUPPRESSED message was not sent, for the compliance audit trail.
+  suppressedReason String?
+  error          String?          @db.Text
+  sentAt         DateTime?
+  createdAt      DateTime         @default(now())
+
+  workspace    Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  contact      Contact?       @relation(fields: [contactId], references: [id], onDelete: SetNull)
+  conversation Conversation?  @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  campaign     Campaign?      @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  automationRun AutomationRun? @relation(fields: [automationRunId], references: [id], onDelete: SetNull)
+  events       MessageEvent[]
+
+  @@index([workspaceId, createdAt])
+  @@index([contactId, createdAt])
+  @@index([conversationId, createdAt])
+  @@index([campaignId])
+  @@index([providerMessageId])
+}
+
+model MessageEvent {
+  id         String           @id @default(cuid())
+  messageId  String
+  type       MessageEventType
+  url        String?
+  userAgent  String?
+  metadata   Json?
+  occurredAt DateTime         @default(now())
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([messageId, occurredAt])
+}
+
+/// The do-not-contact list. Checked on every outbound send; an entry here is
+/// the difference between a compliant program and a complaint.
+model Suppression {
+  id          String            @id @default(cuid())
+  workspaceId String
+  channel     MessageChannel
+  /// Lowercased email, or E.164 phone.
+  address     String
+  reason      SuppressionReason
+  note        String?
+  createdAt   DateTime          @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, channel, address])
+  @@index([workspaceId])
+}
+
+/// Proof that a contact agreed to be messaged on a channel, and where that
+/// agreement came from. Required before the first SMS.
+model ConsentRecord {
+  id          String         @id @default(cuid())
+  workspaceId String
+  contactId   String
+  channel     MessageChannel
+  granted     Boolean
+  source      String
+  /// The exact opt-in wording shown, captured verbatim for the audit trail.
+  text        String?        @db.Text
+  ipAddress   String?
+  occurredAt  DateTime       @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  contact   Contact   @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, contactId, channel])
+}
+
+enum ConversationStatus {
+  OPEN
+  CLOSED
+}
+
+/// One thread per contact per channel — the unified inbox Phase 5 fills with
+/// missed-call text-back replies.
+model Conversation {
+  id             String             @id @default(cuid())
+  workspaceId    String
+  contactId      String
+  channel        MessageChannel
+  status         ConversationStatus @default(OPEN)
+  assignedUserId String?
+  lastMessageAt  DateTime           @default(now())
+  unreadCount    Int                @default(0)
+  createdAt      DateTime           @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  contact   Contact   @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  assignee  User?     @relation(fields: [assignedUserId], references: [id], onDelete: SetNull)
+  messages  Message[]
+
+  @@unique([workspaceId, contactId, channel])
+  @@index([workspaceId, lastMessageAt])
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 — automations
+// ---------------------------------------------------------------------------
+
+enum AutomationStatus {
+  DRAFT
+  ACTIVE
+  PAUSED
+  ARCHIVED
+}
+
+enum AutomationRunStatus {
+  RUNNING
+  WAITING
+  COMPLETED
+  EXITED
+  FAILED
+}
+
+model Automation {
+  id              String           @id @default(cuid())
+  workspaceId     String
+  name            String
+  description     String?
+  status          AutomationStatus @default(DRAFT)
+  activeVersionId String?
+  /// When false, a contact who already ran through cannot re-enter.
+  allowReentry    Boolean          @default(false)
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  workspace Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  versions  AutomationVersion[]
+  runs      AutomationRun[]
+
+  @@unique([workspaceId, name])
+  @@index([workspaceId, status])
+}
+
+/// Graphs are versioned and immutable once published: a run in flight keeps
+/// executing the graph it started on, so editing an automation never corrupts
+/// contacts already partway through it.
+model AutomationVersion {
+  id           String   @id @default(cuid())
+  automationId String
+  version      Int
+  graph        Json
+  publishedAt  DateTime?
+  createdAt    DateTime @default(now())
+
+  automation Automation      @relation(fields: [automationId], references: [id], onDelete: Cascade)
+  runs       AutomationRun[]
+
+  @@unique([automationId, version])
+}
+
+model AutomationRun {
+  id            String              @id @default(cuid())
+  workspaceId   String
+  automationId  String
+  versionId     String
+  contactId     String
+  currentNodeId String?
+  status        AutomationRunStatus @default(RUNNING)
+  resumeAt      DateTime?
+  /// Scratch space carried between nodes (split-test arm, trigger payload).
+  context       Json?
+  lastError     String?             @db.Text
+  startedAt     DateTime            @default(now())
+  endedAt       DateTime?
+
+  workspace  Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  automation Automation          @relation(fields: [automationId], references: [id], onDelete: Cascade)
+  version    AutomationVersion   @relation(fields: [versionId], references: [id], onDelete: Cascade)
+  contact    Contact             @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  steps      AutomationRunStep[]
+  messages   Message[]
+
+  @@index([status, resumeAt])
+  @@index([workspaceId, startedAt])
+  @@index([automationId, contactId])
+}
+
+model AutomationRunStep {
+  id         String   @id @default(cuid())
+  runId      String
+  nodeId     String
+  nodeKind   String
+  output     Json?
+  error      String?  @db.Text
+  occurredAt DateTime @default(now())
+
+  run AutomationRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([runId, occurredAt])
 }
