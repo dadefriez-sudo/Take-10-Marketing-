@@ -1,0 +1,533 @@
+// Take 10 Marketing — data model.
+//
+// Tenancy rule that governs this entire file: Organization (the agency) owns
+// Workspaces (one per client business), and every domain row carries a
+// workspaceId. Nothing is queried without a workspace scope — see lib/tenant.ts.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------------------------------------------------------------------------
+// Phase 0 — identity, tenancy, audit
+// ---------------------------------------------------------------------------
+
+enum Role {
+  OWNER
+  ADMIN
+  MEMBER
+  CLIENT
+}
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  name          String?
+  image         String?
+  passwordHash  String?
+  emailVerified DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  accounts       Account[]
+  sessions       Session[]
+  memberships    Membership[]
+  ownedContacts  Contact[]    @relation("ContactOwner")
+  ownedDeals     Deal[]       @relation("DealOwner")
+  assignedTasks  Task[]       @relation("TaskAssignee")
+  authoredNotes  Note[]
+  activities     Activity[]
+  auditLogs      AuditLog[]
+  sentInvites    Invitation[] @relation("InvitationInviter")
+}
+
+// Auth.js adapter models.
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+model Organization {
+  id           String   @id @default(cuid())
+  name         String
+  slug         String   @unique
+  logoUrl      String?
+  primaryColor String   @default("#0F172A")
+  // White-label defaults inherited by every workspace unless overridden.
+  senderName   String?
+  senderEmail  String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  workspaces  Workspace[]
+  memberships Membership[]
+  invitations Invitation[]
+  auditLogs   AuditLog[]
+}
+
+/// One client business. The unit of data isolation for everything below.
+model Workspace {
+  id             String   @id @default(cuid())
+  organizationId String
+  name           String
+  slug           String
+  /// IANA zone. Booking availability and messaging quiet hours are computed in
+  /// this zone, so it is required rather than nullable.
+  timezone       String   @default("America/New_York")
+  industry       String?
+  websiteUrl     String?
+  phone          String?
+  addressLine1   String?
+  addressLine2   String?
+  city           String?
+  region         String?
+  postalCode     String?
+  country        String   @default("US")
+  archivedAt     DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  memberships   Membership[]
+  invitations   Invitation[]
+  auditLogs     AuditLog[]
+  contacts      Contact[]
+  customFields  CustomField[]
+  tags          Tag[]
+  lists         List[]
+  segments      Segment[]
+  activities    Activity[]
+  notes         Note[]
+  tasks         Task[]
+  pipelines     Pipeline[]
+  deals         Deal[]
+
+  @@unique([organizationId, slug])
+  @@index([organizationId])
+}
+
+/// Agency roles (OWNER/ADMIN/MEMBER) are org-wide and leave workspaceId null.
+/// CLIENT memberships are scoped to a single workspace; a multi-location client
+/// gets one CLIENT row per workspace.
+model Membership {
+  id             String   @id @default(cuid())
+  userId         String
+  organizationId String
+  workspaceId    String?
+  role           Role
+  createdAt      DateTime @default(now())
+
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  workspace    Workspace?   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, organizationId, workspaceId])
+  @@index([organizationId])
+  @@index([workspaceId])
+  @@index([userId])
+}
+
+model Invitation {
+  id             String    @id @default(cuid())
+  organizationId String
+  workspaceId    String?
+  email          String
+  role           Role
+  token          String    @unique
+  invitedById    String?
+  expiresAt      DateTime
+  acceptedAt     DateTime?
+  createdAt      DateTime  @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  workspace    Workspace?   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  invitedBy    User?        @relation("InvitationInviter", fields: [invitedById], references: [id], onDelete: SetNull)
+
+  @@index([organizationId])
+  @@index([email])
+}
+
+model AuditLog {
+  id             String   @id @default(cuid())
+  organizationId String
+  workspaceId    String?
+  actorUserId    String?
+  action         String
+  targetType     String?
+  targetId       String?
+  metadata       Json?
+  createdAt      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  workspace    Workspace?   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  actor        User?        @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, createdAt])
+  @@index([workspaceId, createdAt])
+}
+
+/// Outbound email captured when no live provider is configured. Phase 2 reuses
+/// this table for the real messaging outbox preview.
+model DevInbox {
+  id        String   @id @default(cuid())
+  to        String
+  from      String
+  subject   String
+  body      String   @db.Text
+  channel   String   @default("email")
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  @@index([to, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Phase 1 — CRM
+// ---------------------------------------------------------------------------
+
+enum ContactStatus {
+  LEAD
+  ACTIVE
+  CUSTOMER
+  UNSUBSCRIBED
+  ARCHIVED
+}
+
+enum CustomFieldType {
+  TEXT
+  NUMBER
+  DATE
+  BOOLEAN
+  SELECT
+  MULTI_SELECT
+  URL
+}
+
+enum ActivityType {
+  NOTE
+  EMAIL
+  SMS
+  CALL
+  MEETING
+  FORM_SUBMISSION
+  PAGE_VIEW
+  TAG_ADDED
+  TAG_REMOVED
+  STATUS_CHANGED
+  DEAL_CREATED
+  DEAL_STAGE_CHANGED
+  APPOINTMENT
+  REVIEW
+  IMPORT
+  SYSTEM
+}
+
+enum TaskPriority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+enum DealStatus {
+  OPEN
+  WON
+  LOST
+}
+
+model Contact {
+  id          String        @id @default(cuid())
+  workspaceId String
+  email       String?
+  /// Stored E.164 so SMS and voice lookups in later phases match exactly.
+  phone       String?
+  firstName   String?
+  lastName    String?
+  company     String?
+  jobTitle    String?
+  timezone    String?
+  source      String?
+  status      ContactStatus @default(LEAD)
+  ownerUserId String?
+
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  lastActivityAt DateTime?
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  owner     User?     @relation("ContactOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
+
+  fieldValues ContactFieldValue[]
+  tags        ContactTag[]
+  lists       ContactList[]
+  activities  Activity[]
+  notes       Note[]
+  tasks       Task[]
+  deals       Deal[]
+
+  @@unique([workspaceId, email])
+  @@unique([workspaceId, phone])
+  @@index([workspaceId, createdAt])
+  @@index([workspaceId, status])
+  @@index([workspaceId, lastActivityAt])
+  @@index([ownerUserId])
+}
+
+model CustomField {
+  id          String          @id @default(cuid())
+  workspaceId String
+  key         String
+  label       String
+  type        CustomFieldType @default(TEXT)
+  options     Json?
+  position    Int             @default(0)
+  createdAt   DateTime        @default(now())
+
+  workspace Workspace           @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  values    ContactFieldValue[]
+
+  @@unique([workspaceId, key])
+  @@index([workspaceId])
+}
+
+model ContactFieldValue {
+  id        String @id @default(cuid())
+  contactId String
+  fieldId   String
+  value     Json?
+
+  contact Contact     @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  field   CustomField @relation(fields: [fieldId], references: [id], onDelete: Cascade)
+
+  @@unique([contactId, fieldId])
+  @@index([fieldId])
+}
+
+model Tag {
+  id          String   @id @default(cuid())
+  workspaceId String
+  name        String
+  color       String   @default("#64748B")
+  createdAt   DateTime @default(now())
+
+  workspace Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  contacts  ContactTag[]
+
+  @@unique([workspaceId, name])
+  @@index([workspaceId])
+}
+
+model ContactTag {
+  contactId String
+  tagId     String
+  addedAt   DateTime @default(now())
+
+  contact Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  tag     Tag     @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([contactId, tagId])
+  @@index([tagId])
+}
+
+model List {
+  id          String   @id @default(cuid())
+  workspaceId String
+  name        String
+  description String?
+  createdAt   DateTime @default(now())
+
+  workspace Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  contacts  ContactList[]
+
+  @@unique([workspaceId, name])
+  @@index([workspaceId])
+}
+
+model ContactList {
+  contactId String
+  listId    String
+  joinedAt  DateTime @default(now())
+
+  contact Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  list    List    @relation(fields: [listId], references: [id], onDelete: Cascade)
+
+  @@id([contactId, listId])
+  @@index([listId])
+}
+
+/// A saved filter. `definition` holds the predicate tree compiled by
+/// lib/segments/compile.ts — the single query path shared by the CRM UI and
+/// (from Phase 2) automation conditions.
+model Segment {
+  id          String   @id @default(cuid())
+  workspaceId String
+  name        String
+  description String?
+  definition  Json
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, name])
+  @@index([workspaceId])
+}
+
+model Activity {
+  id          String       @id @default(cuid())
+  workspaceId String
+  contactId   String?
+  type        ActivityType
+  title       String
+  body        String?      @db.Text
+  metadata    Json?
+  actorUserId String?
+  occurredAt  DateTime     @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  contact   Contact?  @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  actor     User?     @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, occurredAt])
+  @@index([contactId, occurredAt])
+}
+
+model Note {
+  id           String   @id @default(cuid())
+  workspaceId  String
+  contactId    String
+  authorUserId String?
+  body         String   @db.Text
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  contact   Contact   @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  author    User?     @relation(fields: [authorUserId], references: [id], onDelete: SetNull)
+
+  @@index([contactId, createdAt])
+  @@index([workspaceId])
+}
+
+model Task {
+  id             String       @id @default(cuid())
+  workspaceId    String
+  contactId      String?
+  assigneeUserId String?
+  title          String
+  description    String?      @db.Text
+  priority       TaskPriority @default(NORMAL)
+  dueAt          DateTime?
+  completedAt    DateTime?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  contact   Contact?  @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  assignee  User?     @relation("TaskAssignee", fields: [assigneeUserId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, dueAt])
+  @@index([assigneeUserId, completedAt])
+  @@index([contactId])
+}
+
+model Pipeline {
+  id          String   @id @default(cuid())
+  workspaceId String
+  name        String
+  isDefault   Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  stages    Stage[]
+  deals     Deal[]
+
+  @@unique([workspaceId, name])
+  @@index([workspaceId])
+}
+
+model Stage {
+  id          String  @id @default(cuid())
+  pipelineId  String
+  name        String
+  position    Int
+  probability Int     @default(0)
+  isWon       Boolean @default(false)
+  isLost      Boolean @default(false)
+
+  pipeline Pipeline @relation(fields: [pipelineId], references: [id], onDelete: Cascade)
+  deals    Deal[]
+
+  @@unique([pipelineId, position])
+  @@index([pipelineId])
+}
+
+model Deal {
+  id              String     @id @default(cuid())
+  workspaceId     String
+  pipelineId      String
+  stageId         String
+  contactId       String?
+  title           String
+  value           Decimal    @default(0) @db.Decimal(12, 2)
+  currency        String     @default("USD")
+  status          DealStatus @default(OPEN)
+  ownerUserId     String?
+  /// Ordering within a kanban column. Sparse (gaps of 1000) so a drag only
+  /// rewrites the moved card instead of the whole column.
+  position        Int        @default(0)
+  expectedCloseAt DateTime?
+  closedAt        DateTime?
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  pipeline  Pipeline  @relation(fields: [pipelineId], references: [id], onDelete: Cascade)
+  stage     Stage     @relation(fields: [stageId], references: [id], onDelete: Restrict)
+  contact   Contact?  @relation(fields: [contactId], references: [id], onDelete: SetNull)
+  owner     User?     @relation("DealOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, status])
+  @@index([stageId, position])
+  @@index([contactId])
+}
