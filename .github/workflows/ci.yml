@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: take10
+          POSTGRES_PASSWORD: take10
+          POSTGRES_DB: take10_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql://take10:take10@127.0.0.1:5432/take10_test?schema=public
+      AUTH_SECRET: ci-only-secret-not-used-anywhere-real
+      NEXT_PUBLIC_APP_URL: http://127.0.0.1:3100
+      E2E_PORT: "3100"
+      CRON_SECRET: ci-cron-secret
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # The Prisma client is generated source, not committed, so everything
+      # below depends on this step.
+      - run: pnpm db:generate
+
+      - run: pnpm typecheck
+
+      - run: pnpm lint
+
+      - name: Apply migrations
+        run: pnpm db:deploy
+
+      # Unit tests plus the tenant-isolation suite, which needs the database.
+      - run: pnpm test
+
+      - name: Seed demo data for e2e
+        run: pnpm db:seed
+
+      - name: Install Playwright browser
+        run: pnpm exec playwright install --with-deps chromium
+
+      - run: pnpm build
+
+      - run: pnpm e2e
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7
