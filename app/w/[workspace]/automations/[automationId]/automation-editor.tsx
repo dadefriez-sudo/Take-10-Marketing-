@@ -410,21 +410,35 @@ function StepCard({
                 onChange={(event) => onChange({ body: event.target.value })}
               />
             </Field>
+            <TransactionalToggle
+              checked={node.transactional ?? false}
+              onChange={(transactional) =>
+                onChange({ transactional } as Partial<AutomationNode>)
+              }
+            />
           </>
         ) : null}
 
         {node.kind === "send_sms" ? (
-          <Field
-            label="Message"
-            className="sm:col-span-2"
-            hint="An opt-out line is appended automatically."
-          >
-            <Textarea
-              value={node.body}
-              rows={3}
-              onChange={(event) => onChange({ body: event.target.value })}
+          <>
+            <Field
+              label="Message"
+              className="sm:col-span-2"
+              hint="An opt-out line is appended automatically."
+            >
+              <Textarea
+                value={node.body}
+                rows={3}
+                onChange={(event) => onChange({ body: event.target.value })}
+              />
+            </Field>
+            <TransactionalToggle
+              checked={node.transactional ?? false}
+              onChange={(transactional) =>
+                onChange({ transactional } as Partial<AutomationNode>)
+              }
             />
-          </Field>
+          </>
         ) : null}
 
         {node.kind === "wait" && node.untilHour === undefined ? (
@@ -609,6 +623,37 @@ function StepCard({
         ) : null}
       </div>
     </Card>
+  );
+}
+
+/**
+ * Marks a step as a direct response to something the recipient just did — an
+ * appointment confirmation, a password reset. Those bypass quiet hours and
+ * marketing consent, but never the suppression list.
+ */
+function TransactionalToggle({
+  checked,
+  onChange,
+}: {
+  checked: boolean;
+  onChange: (value: boolean) => void;
+}) {
+  return (
+    <label className="sm:col-span-2 flex items-start gap-2">
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(event) => onChange(event.target.checked)}
+        className="mt-0.5 size-4 shrink-0"
+      />
+      <span className="text-sm">
+        Transactional
+        <span className="text-muted-foreground block text-xs">
+          Confirms something the contact just did. Sends outside quiet hours and
+          without marketing consent — but never to an unsubscribed address.
+        </span>
+      </span>
+    </label>
   );
 }
 

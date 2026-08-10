@@ -1,3 +1,5 @@
+// The test process needs the same env as the server (CRON_SECRET, DATABASE_URL).
+import "dotenv/config";
 import { defineConfig, devices } from "@playwright/test";
 
 import { existsSync } from "node:fs";

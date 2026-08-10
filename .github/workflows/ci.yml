@@ -32,6 +32,7 @@ jobs:
       AUTH_SECRET: ci-only-secret-not-used-anywhere-real
       NEXT_PUBLIC_APP_URL: http://127.0.0.1:3100
       E2E_PORT: "3100"
+      CRON_SECRET: ci-cron-secret
 
     steps:
       - uses: actions/checkout@v4
