@@ -4,8 +4,9 @@ An agency operating platform: run many client businesses from one place, with
 their contacts, bookings, reviews, and after-hours call capture in a single
 system instead of six SaaS subscriptions.
 
-**Status: Phase 0 + Phase 1 complete.** Multi-tenant foundation and the CRM are
-built and tested. The phases that follow are listed below.
+**Status: Phases 0–2 complete.** Multi-tenant foundation, CRM, and the
+messaging + automation engine are built and tested. The phases that follow are
+listed below.
 
 ---
 
@@ -25,6 +26,16 @@ built and tested. The phases that follow are listed below.
   and CSV export.
 - **Deals.** Drag-and-drop pipeline with per-stage value rollups.
 - **Client portal.** A separate, simplified surface clients log into.
+- **Messaging.** One outbound path for email and SMS with compliance enforced at
+  the door: suppression, consent, quiet hours in the recipient's local time,
+  CAN-SPAM footer, one-click unsubscribe, and SMS STOP/START/HELP.
+- **Automations.** Versioned sequences with waits, if/else, A/B splits, and
+  goals, driven by a durable Postgres job queue. Editing never strands contacts
+  mid-sequence.
+- **Campaigns.** One-off broadcasts to a saved segment, with the audience size
+  shown before anything sends.
+- **Unified inbox.** One thread per contact per channel, with replies.
+- **Open and click tracking**, HMAC-signed so engagement numbers can't be forged.
 
 ## Getting started
 
@@ -102,8 +113,8 @@ Three decisions worth knowing:
 |---|---|---|
 | 0 | Foundation: tenancy, auth, audit, shell | ✅ Done |
 | 1 | CRM: contacts, segments, timeline, deals, tasks | ✅ Done |
-| 2 | Messaging spine + visual automation engine (email/SMS) | Next |
-| 3 | Booking: services, availability, calendar sync, reminders | Planned |
+| 2 | Messaging spine + automation engine (email/SMS) | ✅ Done |
+| 3 | Booking: services, availability, calendar sync, reminders | Next |
 | 4 | Google reviews: request automation, replies, monitoring | Planned |
 | 5 | After-hours: missed-call text-back, IVR, unified inbox | Planned |
 | 6 | Lead capture: forms and landing pages | Planned |
@@ -135,9 +146,25 @@ Not required to run the app; required to take each phase live.
 ## Testing
 
 ```bash
-pnpm test    # 47 tests: segment compiler (42) + tenant isolation (5, needs DB)
-pnpm e2e     # browser flows incl. client-cannot-reach-another-client
+pnpm test    # 149 tests: segment compiler + evaluator parity, compliance guard,
+             # automation reducer, tracking, and DB-backed integration suites
+pnpm e2e     # 17 browser flows, incl. client-cannot-reach-another-client and a
+             # full automation run from publish to delivery
 ```
+
+### The automation engine
+
+`lib/automation/step.ts` is a pure reducer — it performs no I/O, so every node
+kind, branch, and wait resumption is testable in milliseconds. `run.ts` loads
+state, calls it, and writes back what came out. Graphs are versioned and
+immutable once published, so editing an automation cannot strand a contact
+partway through a sequence that no longer exists.
+
+The same segment predicate language has two backends: `compile.ts` produces a
+Prisma `where` for audience queries, and `evaluate.ts` evaluates in memory for
+automation conditions. A parity suite runs identical predicates through both
+against a real database — it exists because they *did* diverge once, on how
+Postgres treats NULL in a negation.
 
 `pnpm test` skips the isolation suite when `DATABASE_URL` is unset; CI always
 provides one, so it always runs there.
