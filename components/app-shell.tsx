@@ -8,6 +8,7 @@ import {
   PhoneCall,
   Settings,
   Users,
+  Workflow,
 } from "lucide-react";
 import type { TenantContext } from "@/lib/tenant";
 import { Badge } from "@/components/ui";
@@ -43,6 +44,11 @@ function navigation(slug: string) {
         href: `/w/${slug}/deals`,
         label: "Deals",
         icon: <KanbanSquare className="size-4" />,
+      },
+      {
+        href: `/w/${slug}/automations`,
+        label: "Automations",
+        icon: <Workflow className="size-4" />,
       },
       {
         href: `/w/${slug}/tasks`,
