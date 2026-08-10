@@ -11,6 +11,7 @@ import {
   evaluateSend,
   type Channel,
 } from "./guard";
+import { instrumentHtml } from "./tracking";
 
 /**
  * The single outbound path for email and SMS.
@@ -222,19 +223,26 @@ export async function sendMessage(request: SendRequest): Promise<SendOutcome> {
     select: { id: true },
   });
 
+  // Tracking is applied after the row exists, because both the pixel and the
+  // click signatures are bound to the message id.
+  const instrumented =
+    request.channel === "EMAIL"
+      ? instrumentHtml(decorated, message.id)
+      : decorated;
+
   try {
     const result =
       request.channel === "EMAIL"
         ? await sendEmail({
             to: address,
             subject: request.subject ?? "(no subject)",
-            html: decorated,
+            html: instrumented,
             from: fromAddress,
             metadata: { messageId: message.id },
           })
         : await sendSms({
             to: address,
-            body: decorated,
+            body: instrumented,
             from: fromAddress,
             metadata: { messageId: message.id },
           });

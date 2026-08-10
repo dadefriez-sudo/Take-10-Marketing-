@@ -1,11 +1,13 @@
 import Link from "next/link";
 import {
   CalendarCheck,
+  Inbox,
   KanbanSquare,
   LayoutDashboard,
   ListChecks,
   MessageSquareQuote,
   PhoneCall,
+  Send,
   Settings,
   Users,
   Workflow,
@@ -46,9 +48,19 @@ function navigation(slug: string) {
         icon: <KanbanSquare className="size-4" />,
       },
       {
+        href: `/w/${slug}/inbox`,
+        label: "Inbox",
+        icon: <Inbox className="size-4" />,
+      },
+      {
         href: `/w/${slug}/automations`,
         label: "Automations",
         icon: <Workflow className="size-4" />,
+      },
+      {
+        href: `/w/${slug}/campaigns`,
+        label: "Campaigns",
+        icon: <Send className="size-4" />,
       },
       {
         href: `/w/${slug}/tasks`,
